@@ -9,7 +9,7 @@ namespace TemplateJobWorkerNode.Utilities
 {
     static class DisableConsoleQuickEdit
     {
-        const uint ENABLE_QUICK_EDIT = 0x1234;
+        const uint ENABLE_QUICK_EDIT = 0x0040;
         const int STD_INPUT_HANDLE = -10; // Standard input device
 
         [DllImport("kernel32.dll", SetLastError = true)]

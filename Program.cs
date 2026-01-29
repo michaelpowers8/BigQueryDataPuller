@@ -1,22 +1,23 @@
-﻿//DISCRETION: ALL CREDENTIALS SEEN IN THIS ARE 100% FAKE. THIS PROGRAM IS FOR SKILL DEMONSTRATION ONLY AND WILL NOT DO ANYTHING
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
-using System.Diagnostics;
-using System.Threading;
-using ErecoverQueuedTasks;
-using Newtonsoft.Json;
-using NLog;
-using TemplateJobWorkerNode.Utilities;
 using System.Data;
+using System.Data.SqlClient;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices.ComTypes;
 using System.Text;
+using System.Threading;
 using CsvHelper;
+using ErecoverQueuedTasks;
 using Google.Apis.Auth.OAuth2;
 using Google.Cloud.BigQuery.V2;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using NLog;
+using TemplateJobWorkerNode.Utilities;
 
 namespace TemplateJobWorkerNode
 {
@@ -49,7 +50,7 @@ namespace TemplateJobWorkerNode
 			int waitTimeSeconds = Convert.ToInt32(appSettings["WaitTimeInSeconds"] ?? "300");
 			QueuedTaskType taskType = (QueuedTaskType)Convert.ToInt32(appSettings["TaskTypeId"]);
 			string machineName = appSettings["MachineNodeName"] ?? "NULL MACHINE NAME"; // TODO: Set a machine name in the app.config
-			string connectionString = System.Configuration.ConfigurationManager.ConnectionStrings["Auditing_Tool"].ConnectionString;
+			string connectionString = System.Configuration.ConfigurationManager.ConnectionStrings["AuditTool"].ConnectionString;
 			int clientFamilyId = Convert.ToInt32(appSettings["ClientFamilyId"] ?? "88"); // TODO: If you only want to select tasks for a certain client family, set ClientFamilyId in the app.config
 
 			var taskFactory = new QueuedTaskFactory(QueuedTaskType.BigQuery, machineName, connectionString, clientFamilyId);
@@ -227,16 +228,16 @@ namespace TemplateJobWorkerNode
 					#endregion
 
 					#region BigQuery Credentials
-					/* Setting the BigQuery Credentials provided by client directly from file.
+					/* Setting the BigQuery Credentials provided by Schnucks directly from file.
 					 * A copy of these credentials were added in App.config for reference but are not directly used.
-					 * THIS PROGRAM WILL IMMEDIATELY STOP IF credentials.json IS NOT FOUND*/
+					 * THIS PROGRAM WILL IMMEDIATELY STOP IF schnucks-atg-sa-f87620578592.json IS NOT FOUND*/
 					string credentialsPath = appSettings["credentialsPath"];
 					GoogleCredential credential;
 					BigQueryClient client;
 					try
 					{
 						credential = GoogleCredential.FromFile(credentialsPath);
-						client = BigQueryClient.Create("client-project-id", credential);
+						client = BigQueryClient.Create("schnucks-datalake-prod", credential);
 					}
 					catch (Exception e)
 					{
@@ -352,6 +353,66 @@ namespace TemplateJobWorkerNode
 			_logger.Info(message);
 			Console.WriteLine($"{DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")} {message}");
 		}
+
+		/// <summary>
+		/// Connect to SQL Server Management Studio server barney, and open the Schnucks_Big_Query_Table_Columns
+		/// table. Select the data type value of a specific column for a specific table. 
+		/// </summary>
+		/// <param name="table">Full table name including project id, dataset, and table id. Must be in form of project.dataset.table</param>
+		/// <param name="column">Column name to be identified in the table</param>
+		/// <returns>Data type of specified column from specified table in parameters. Will be in all uppercase</returns>
+		static string GetColumnType(string table, string column)
+		{
+			string[] table_parts = table.Split('.');
+			string project_id = table_parts[0];
+			string dataset_id = table_parts[1];
+			string table_id = table_parts[2];
+			using (SqlConnection connection = new SqlConnection(System.Configuration.ConfigurationManager.ConnectionStrings["BigQueryColumnPuller"].ConnectionString))
+			{
+				try
+				{
+					connection.Open();
+
+					// Example: Execute a simple query
+					string query = $"SELECT data_type " +
+						$"FROM {appSettings["BigQueryColumnsTable"]} " +
+						$"WHERE " +
+						$"project_id=\'{project_id}\' AND " +
+						$"dataset_id=\'{dataset_id}\' AND " +
+						$"table_id=\'{table_id}\' AND " +
+						$"column_name=\'{column}\'"
+						;
+					using (SqlCommand command = new SqlCommand(query, connection))
+					{
+						using (SqlDataReader reader = command.ExecuteReader())
+						{
+							if (reader.Read())
+							{
+								return reader["data_type"].ToString().ToUpper();
+							}
+							else
+							{
+								logAndPrintError(_logger, $"Could not find a column named {column} in {table} or {table} does not exist in [sandbox_mp].[dbo].[Schnucks_Big_Query_Table_Columns]");
+								connection.Close();
+								return null;
+							}
+						}
+					}
+				}
+				catch (SqlException ex)
+				{
+					logAndPrintError(_logger,$"SQL Error: {ex.Message}");
+					connection.Close();
+					return null;
+				}
+				catch (Exception ex)
+				{
+					logAndPrintError(_logger, $"General Error: {ex.Message}");
+					connection.Close();
+					return null;
+				}
+			}
+		}
 		#endregion
 
 		#region Getting Query Parameters
@@ -427,6 +488,7 @@ namespace TemplateJobWorkerNode
 					string startDatestr = string.IsNullOrWhiteSpace(dateRange.StartDate)
 						? new DateTime(1900,1,1).ToString("yyyy-MM-dd")
 						: dateRange.StartDate;
+					
 
 					DateTime startDate = GetDateOverride(startDatestr, _logger);
 					if (startDate.Year < 2015)
@@ -518,7 +580,20 @@ namespace TemplateJobWorkerNode
 		{
 			try
 			{
+				Console.WriteLine(variableDate);
 				return DateTime.Parse(variableDate);
+			}
+			catch
+			{
+				logAndPrintInfo(_logger, $"Could not parse {variableDate} to DateTime from yyyy-mm-dd. Attempting to parse from yyyymmdd format.");
+			}
+			try
+			{
+				return DateTime.Parse(DateTime.ParseExact(
+						s: variableDate,
+						format: "yyyyMMdd",
+						provider: CultureInfo.InvariantCulture
+					).ToString("yyyy-MM-dd"));
 			}
 			catch
 			{
@@ -534,7 +609,7 @@ namespace TemplateJobWorkerNode
 			 * start date is later than the end date. It will not assume you had it backwards. If either 
 			 * the start date or end date are null, the logger will inform that no overriding dates were found
 			 * and will return null. */
-			if (start >= end)
+			if (start > end)
 			{
 				logAndPrintError(_logger, $"Starting date and ending date found, but start date must be before the ending date. \nExample: \n\tstartDate=2024/01/01\n\tendDate=2024/12/31\nActual Dates Passed: Start={start} , End={end}");
 				return null;
@@ -588,7 +663,7 @@ namespace TemplateJobWorkerNode
 
 		#region Data Extraction
 		/// <summary>
-		/// Call big query table with a date where clause on a column. These where clauses can either include
+		/// Call big query table with a date where clause on a column.. These where clauses can either include
 		/// a single start date, or a start and end date. If only a start date is passed, then all dates from the 
 		/// start date to the current date are assumed. If a start date and end date are passed, then a list of
 		/// all dates from start to end INCLUSIVE are made. The program will create one single csv file per 
@@ -618,6 +693,7 @@ namespace TemplateJobWorkerNode
 			// This function is extracts all data from a list of tables that have date ranges.
 			StringBuilder end_json = new StringBuilder("[");
 			string query = null;
+			string columnType = GetColumnType(table, column);
 			List<List<object>> empty_tables = new List<List<object>>();
 			foreach (DateTime currentDate in dates) // Loop through all tables for a single day first, then move to the next day
 			{
@@ -626,11 +702,25 @@ namespace TemplateJobWorkerNode
 				{
 					if (topNumberOfRows > 0)
 					{
-						query = $"SELECT * FROM `{table}` WHERE {column} = '{currentDate:yyyy-MM-dd}' LIMIT {topNumberOfRows}";
+						if (string.Equals(columnType, "NUMERIC", StringComparison.OrdinalIgnoreCase))
+						{
+							query = $"SELECT * FROM `{table}` WHERE {column} >= {currentDate:yyyyMMdd} AND {column} < {currentDate.AddDays(1.0):yyyyMMdd} LIMIT {topNumberOfRows}";
+						}
+						else
+						{
+							query = $"SELECT * FROM `{table}` WHERE {column} >= '{currentDate:yyyy-MM-dd}' AND {column} < '{currentDate.AddDays(1.0):yyyy-MM-dd}' LIMIT {topNumberOfRows}";
+						}
 					}
 					else
 					{
-						query = $"SELECT * FROM `{table}` WHERE {column} = '{currentDate:yyyy-MM-dd}'";
+						if (string.Equals(columnType, "NUMERIC", StringComparison.OrdinalIgnoreCase))
+						{
+							query = $"SELECT * FROM `{table}` WHERE {column} >= {currentDate:yyyyMMdd} AND {column} < {currentDate.AddDays(1.0):yyyyMMdd}";
+						}
+						else
+						{
+							query = $"SELECT * FROM `{table}` WHERE {column} >= '{currentDate:yyyy-MM-dd}' AND {column} < '{currentDate.AddDays(1.0):yyyy-MM-dd}'";
+						}
 					}
 				}
 				catch (Exception e)
